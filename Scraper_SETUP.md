@@ -66,5 +66,7 @@ AM HOOPS: done
 all done
 ```
 
-- **Stopping:** Ctrl+C is safe. Run `python scraper.py` again to continue where it stopped.
+- **Status column:** the scraper sets a creator to `in progress` with your name before it starts, and to `done` when it finishes. It skips creators that are `done` or `in progress` under someone else's name, so several people can run it at once.
+- **Stopping:** Ctrl+C is safe. Run `python scraper.py` again to continue where it stopped, as long as the Status still shows your name.
 - **`FAILED`:** if a creator shows `FAILED (...)`, the run continues with the next creator. Fix the cause (usually a wrong URL in the sheet) and rerun.
+- **Stuck `in progress` under someone else's name:** if their run crashed, clear the Status, Claimed by and Date cells for that row in the sheet and run the scraper again.

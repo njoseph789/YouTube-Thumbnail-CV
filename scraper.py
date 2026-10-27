@@ -1,6 +1,6 @@
 """Scrape every creator in the tracker sheet: thumbnails -> Drive subfolder per creator,
-normalized video metadata -> BigQuery. Creators marked done in the sheet that also have a
-Drive folder are skipped; anything else is scraped (or resumed)."""
+normalized video metadata -> BigQuery. A creator is claimed in the sheet ("in progress") before
+scraping; creators that are done, or in progress by someone else, are skipped."""
 import glob
 import json
 import os
@@ -342,6 +342,16 @@ def write_sheet(sess, title, row_num, cells):
     }).raise_for_status()
 
 
+def read_status(sess, title, row_num):
+    """Fresh (Status, Claimed by) for one sheet row, read just before claiming it."""
+    r = sess.get(f"{SHEETS}/{SHEET_ID}/values/" + urllib.parse.quote(f"'{title}'!D{row_num}:E{row_num}", safe=""),
+                 timeout=TIMEOUT)
+    r.raise_for_status()
+    row = (r.json().get("values") or [[]])[0]
+    row = [c.strip() for c in row] + [""] * (2 - len(row))
+    return row[0], row[1]
+
+
 def resolve_channel_id(url):
     m = re.search(r"youtube\.com/channel/(UC[\w-]+)", url)
     if m:
@@ -418,22 +428,30 @@ def main():
     in_child = {n: existing_ids(bq, n) for n in CHILD_SCHEMAS}  # guards against crash-time duplicates
     print(f"{len(creators)} creators in the sheet, {len(folders)} folders already in Drive")
 
+    me = ENV.get("CLAIMED_BY", "").strip()
+    if not me:
+        raise SystemExit("Set CLAIMED_BY in .env. See Scraper_SETUP.md.")
+
     with ThreadPoolExecutor(WORKERS) as pool:
-        for row_num, creator, url, sheet_cid, status in creators:
+        for row_num, creator, url, sheet_cid, _ in creators:
             try:
-                # folder + Status done = finished. A folder without done (e.g. a crashed run) is resumed:
-                # videos already in BigQuery and thumbnails already in Drive are skipped.
-                if norm(creator) in folders and status.lower() == "done":
+                status, claimed_by = read_status(drive, title, row_num)  # fresh, other runs may have moved on
+                if status.lower() == "done" and norm(creator) in folders:
                     print(f"{creator}: already done, skipping")
                     if not sheet_cid:
                         write_sheet(drive, title, row_num, {"C": resolve_channel_id(url)})
                     continue
+                if status.lower() == "in progress" and claimed_by.casefold() != me.casefold():
+                    print(f"{creator}: in progress by {claimed_by or 'someone'}, skipping")
+                    continue
+                # Free, or ours from a crashed run (resumes: loaded videos and uploaded thumbnails are skipped).
+                write_sheet(drive, title, row_num, {
+                    "D": "in progress", "E": me, "F": datetime.now().strftime("%Y-%m-%d")})
                 cid = scrape_creator(creds, drive, bq, pool, in_bq, in_child, creator, url)
                 write_sheet(drive, title, row_num, {
-                    "C": cid, "D": "done", "E": ENV.get("CLAIMED_BY", ""),
-                    "F": datetime.now().strftime("%Y-%m-%d")})
+                    "C": cid, "D": "done", "E": me, "F": datetime.now().strftime("%Y-%m-%d")})
                 print(f"{creator}: done")
-            except Exception as e:  # leave this row unmarked and carry on with the next creator
+            except Exception as e:  # row stays "in progress" under our name; resume by rerunning
                 print(f"{creator}: FAILED ({e!r})")
     print("all done")
 
