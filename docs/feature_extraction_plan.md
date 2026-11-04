@@ -3,7 +3,7 @@
 ## 1. Collect and store
 Pull thumbnails and metadata from the YouTube API, with images and metadata linked by video ID.
 
-## 2. Extract features (neural networks)
+## 2. Extract features (Neural Networks)
 
 - **Objects:** Customized detector, with Grounding DINO and YOLO-World as candidates. The transfer learning owner will compare and experiment with configurations.
 - **Faces:** MediaPipe Face Detection and RetinaFace as candidates, plus an emotion classifier.
