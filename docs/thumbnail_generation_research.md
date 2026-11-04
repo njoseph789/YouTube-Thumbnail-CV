@@ -1,6 +1,6 @@
 # Thumbnail Generation Conditioned on Success Features: Initial Research
 
-Author: Alex Bacro. Draft of 2026-10-31, for team discussion.
+Author: Alex Bacro. Draft of 2026-10-31, revised 2026-11-03, for team discussion.
 
 ## Contents
 
@@ -19,7 +19,7 @@ Author: Alex Bacro. Draft of 2026-10-31, for team discussion.
 
 As of commit `6769fce` the repo holds only the data pipeline:
 
-- `scraper.py` reads creators from the shared Creator Tracker sheet. For each channel it pulls all non-Shorts uploads (the `UULF` playlist), saves the best available thumbnail (`maxres` is 1280x720) to a Drive folder per creator as `<video_id>.jpg`, and writes metadata to BigQuery dataset `youtube-scraper-512714.youtube_thumbnails`.
+- `scraper.py` reads creators from the shared Creator Tracker sheet. For each channel it pulls all non-Shorts uploads (the `UULF` playlist), saves the best available thumbnail to a Drive folder (it tries `fhd`, then `maxres` at 1280x720, then smaller sizes; `fhd` is not a documented Data API size, so in practice most files should be `maxres` or smaller) per creator as `<video_id>.jpg`, and writes metadata to BigQuery dataset `youtube-scraper-512714.youtube_thumbnails`.
 - BigQuery tables: `videos` (title, description, `published_at`, `category_id`, `duration_seconds`, `definition`, `caption`, `licensed_content`, `made_for_kids`, `view_count`, `like_count`, `comment_count`, `has_paid_product_placement`, `drive_file_id`, `thumbnail_size`, `scraped_at`, ...), plus `video_tags`, `video_topics` (Wikipedia topic categories), `video_thumbnails`, `video_localizations`, `video_content_ratings` and `video_region_restrictions`.
 - There are no image features, EDA notebooks, models or feature definitions yet. So the visual "success features" below are proposals that need to match what the rest of the team builds.
 
@@ -33,7 +33,7 @@ Consequences for generation:
 
 ## 2. Defining "success" with the data we have
 
-"Creators with consistent audiences" suggests normalizing within each channel, so that the label reflects the thumbnail rather than the channel's size:
+Our project goal is to find which traits make thumbnails successful for creators with consistent audiences (the team's framing; the course guidelines don't specify a topic). That framing suggests normalizing within each channel, so that the label reflects the thumbnail rather than the channel's size:
 
 ```
 age_days   = scraped_at - published_at
@@ -69,13 +69,13 @@ To condition directly on success, add a token such as `<high_perf>` or `<low_per
 
 ### 4.1 Latent diffusion with LoRA fine-tuning
 
-| Base model | Params | License (verified Oct 2026) | Notes |
+| Base model | Params | License (checked against model cards, Nov 3, 2026) | Notes |
 |---|---|---|---|
 | SD 1.5 ([HF, community mirror](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5)) | 0.9B | CreativeML OpenRAIL-M | Runway's original repo was removed in 2024. The cheapest option, and small enough to train on my laptop at 512 to 768 px. Biggest ControlNet ecosystem; weak image quality and text. |
 | SDXL 1.0 ([HF](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0)) | 3.5B | CreativeML OpenRAIL++-M (permissive with use restrictions) | Mature LoRA, ControlNet, T2I-Adapter and IP-Adapter support. Native 16:9 bucket of 1344x768. Text rendering is poor. |
 | SD 3.5 Medium/Large ([license](https://stability.ai/license)) | 2.5B / 8B | Stability Community License: free under $1M annual revenue, research always free | Better prompt following and text than SDXL; smaller adapter ecosystem. |
-| FLUX.2 [klein] 4B ([HF](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)) | 4B | Apache 2.0 | The newest fully open BFL model, about 13 GB VRAM, fast, with good text. The 9B klein and the 32B FLUX.2 [dev] are under the FLUX Non-Commercial License ([BFL licensing](https://bfl.ai/licensing)). |
-| Qwen-Image ([HF](https://huggingface.co/Qwen/Qwen-Image)) | 20B | Apache 2.0 (the newer Qwen-Image-2.1 is reportedly non-commercial, unverified) | The best open model for text rendering, but too big to train comfortably; cloud only. |
+| FLUX.2 [klein] 4B ([HF](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)) | 4B | Apache 2.0 | The newest fully open BFL model, about 13 GB VRAM, fast, with good text. The 9B klein and the 32B FLUX.2 [dev] are under the FLUX Non-Commercial License ([klein 9B card](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B), [dev card](https://huggingface.co/black-forest-labs/FLUX.2-dev)). |
+| Qwen-Image ([HF](https://huggingface.co/Qwen/Qwen-Image)) | 20B | Apache 2.0 (the newer Qwen-Image-2.1 is under the research-only [Qwen Research License](https://github.com/QwenLM/Qwen-Image-2.1/blob/main/LICENSE)) | The best open model for text rendering, but too big to train comfortably; cloud only. |
 
 - **Data:** a style LoRA needs a few hundred to a few thousand captioned thumbnails. We will have tens of thousands across creators. Use the top-tercile thumbnails per creator, or all of them with the success token.
 - **Compute:** an SDXL LoRA (rank 16 to 32, 1024 px, cached latents) takes about 2 to 4 hours on a Colab A100 for around 10k steps; on my laptop it would be many times slower. A small SD 1.5 LoRA is feasible overnight on my laptop as a backup if Colab runs out. All models above can run inference on my laptop's 48 GB.
@@ -132,7 +132,7 @@ To condition directly on success, add a token such as `<high_perf>` or `<low_per
 - It is the "classical" competitor and earns the custom-code bonus.
 - If the team wants a closer contest, make retrieval-plus-edit (4.5) a third, zero-training baseline.
 
-The comparison is fair because both models take the same condition vector and are scored by the same metrics at the same output size (downsample the champion's images for FID/KID).
+The comparison is fair because both models take the same condition vector and are scored by the same metrics at the same output size (downsample the champion's images to 256x144 for the head-to-head FID/KID). Note that FID and KID resize every image to 299x299 for the Inception network anyway, so the low-resolution comparison mostly measures content and composition, not fine detail. Report a second, full-resolution FID/KID for the champion alone so its detail quality is visible too.
 
 ## 6. Evaluation
 
@@ -149,24 +149,29 @@ Generate about 1,000 to 2,000 images per model from held-out condition vectors (
 
 **Predictor gaming risk.** A generator tuned (or cherry-picked) against the same predictor used to score it will find that predictor's blind spots: oversaturation, giant faces everywhere, adversarial textures. Reward-tuned diffusion models are known to over-optimize and collapse to a few high-reward images ([DRaFT, Clark et al. 2024](https://arxiv.org/abs/2309.17400); [DDPO, Black et al. 2023](https://arxiv.org/abs/2305.13301); [Zhang et al. 2024](https://arxiv.org/abs/2402.08552)). Mitigations:
 
-1. Never fine-tune or rerank against the evaluation critic. If we rerank best-of-N, use a different critic (another architecture, seed or data split) from the one that reports results.
+1. Never fine-tune or rerank against the evaluation critic. If we rerank best-of-N, use a different critic (another architecture, seed or data split) from the one that reports results. **This is a request to Eric and Nathan:** besides their main predictor, they would need to train a second, independent one (e.g. their challenger model, or the champion retrained on a different split) that generation can use for reranking, keeping the main predictor for scoring only.
 2. Report the critic score next to realism, diversity and memorization, never alone.
 3. Check the critic on out-of-distribution inputs (noise, oversaturated real thumbnails) to see whether it is exploitable.
 4. Remember that the critic predicts relative views, not causal CTR, so a high score means "looks like this creator's hits", not "will get clicks".
 
 ## 7. Minimal plan and milestones
 
-Training runs on Colab. My laptop is used for prototyping, inference and the demo.
+Training runs on Colab. My laptop is used for prototyping, inference and the demo. Collin and Nick can shift to helping with generation once the EDA is done, but the scope below is kept deliberately small: two models, one evaluation harness, and a model-ops design rather than a built deployment.
 
 | Step | Milestone | Output |
 |---|---|---|
-| 1 | Agree on the success label with Eric and Nathan and on the feature schema with Collin and Nick; export a manifest (`video_id, channel, drive_file_id, perf, success`) from BigQuery; create a train/val/test split by video, stratified by creator, and share it with the predictor | `data/manifest.parquet`, split file |
-| 2 | Condition-vector extractor (captions, faces, emotion, OCR boxes, palette, saliency), shared with Collin and Nick's EDA so feature definitions match; render the condition maps | `src/conditions.py`, sample visualizations for the EDA |
-| 3 | Retrieval-plus-edit baseline (inference only); evaluation harness (KID/FID, CLIPScore, adherence, LPIPS, and a hook for Eric and Nathan's predictor as critic) | `src/eval_gen.py`, first numbers |
-| 4 | Challenger: train the custom cGAN on Colab | Checkpoints, samples, metrics |
-| 5 | Champion: SDXL LoRA on Colab; ControlNet/T2I/IP-Adapter inference pipeline; PIL text overlay | LoRA weights, pipeline |
-| 6 | Full comparison on the held-out set, human A/B test, critic scoring with a held-out critic | Results tables |
-| 7 | Model-ops: FastAPI endpoint `POST /generate {channel_id, title, overrides}` returning N candidates ranked by the critic; Gradio demo; MLflow tracking; monthly refresh (re-scrape, recompute labels, retrain the LoRA when KID or critic drift exceeds a threshold); deck slides | Deployment diagram, demo |
+| 1 | Agree on the success label with Eric and Nathan and on the feature schema with Collin and Nick; export a manifest (`video_id, channel, drive_file_id, published_at, perf, success`) from BigQuery; create a **time-based** train/val/test split within each creator (e.g. each creator's oldest 70% of videos for train, next 15% val, newest 15% test) and share it with the predictor | `data/manifest.parquet`, split file |
+| 2 | Champion smoke test on my laptop with off-the-shelf weights (SDXL + ControlNet-union + IP-Adapter + PIL text, no training), so a working end-to-end pipeline exists early | Notebook, first sample images |
+| 3 | Condition-vector extractor (captions, faces, emotion, OCR boxes, palette, saliency), shared with Collin and Nick's EDA so feature definitions match; render the condition maps | `src/conditions.py`, sample visualizations for the EDA |
+| 4 | Evaluation harness (KID/FID, CLIPScore, adherence, LPIPS, and a hook for Eric and Nathan's predictor as critic), first run on the untrained champion | `src/eval_gen.py`, first numbers |
+| 5 | Champion: SDXL LoRA on Colab, plugged into the step 2 pipeline | LoRA weights, pipeline |
+| 6 | Challenger: train the custom cGAN on Colab | Checkpoints, samples, metrics |
+| 7 | Full comparison on the held-out set, human A/B test, critic scoring with a held-out critic | Results tables |
+| 8 | Model-ops **design** for the report: architecture diagram (API endpoint `POST /generate {channel_id, title, overrides}` returning N candidates ranked by the critic) and a maintenance plan (monthly re-scrape, recompute labels, retrain the LoRA when KID or critic drift exceeds a threshold); deck slides | Deployment diagram, maintenance plan |
+
+Why time-based: a random split puts a creator's later videos in training and earlier ones in test, so models learn from the "future" and the predictor's scores look better than they will on new uploads. Splitting by date within each creator mimics the real use case (a new video from a known creator).
+
+Stretch goals, only if time allows: the retrieval-plus-edit baseline (4.5), swapping in FLUX.2 klein 4B, a Gradio demo, and MLflow tracking.
 
 ## 8. Open questions for the team
 
@@ -191,7 +196,7 @@ Training runs on Colab. My laptop is used for prototyping, inference and the dem
 ## 10. References
 
 - Data and policies: [YouTube Data API](https://developers.google.com/youtube/v3); [Developer Policies](https://developers.google.com/youtube/terms/developer-policies); [YouTube ToS](https://www.youtube.com/t/terms). Possible extra open data: [l3afai/youtube-thumbnails](https://huggingface.co/datasets/l3afai/youtube-thumbnails) (about 164k thumbnails with titles, no performance labels; check its license).
-- Models and licenses: [SD 1.5 mirror](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5); [SDXL](https://arxiv.org/abs/2307.01952); [Stability Community License](https://stability.ai/license); [FLUX.2 klein 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B); [FLUX.2 repo](https://github.com/black-forest-labs/flux2); [BFL licensing](https://bfl.ai/licensing); [Qwen-Image](https://github.com/QwenLM/Qwen-Image).
+- Models and licenses: [SD 1.5 mirror](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5); [SDXL](https://arxiv.org/abs/2307.01952); [Stability Community License](https://stability.ai/license); [FLUX.2 klein 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B); [FLUX.2 repo](https://github.com/black-forest-labs/flux2); [FLUX.2 klein 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B); [FLUX.2 dev](https://huggingface.co/black-forest-labs/FLUX.2-dev); [BFL licensing](https://bfl.ai/licensing); [Qwen-Image](https://github.com/QwenLM/Qwen-Image).
 - Methods: LoRA ([Hu et al. 2021](https://arxiv.org/abs/2106.09685)); ControlNet ([2302.05543](https://arxiv.org/abs/2302.05543)); T2I-Adapter ([2302.08453](https://arxiv.org/abs/2302.08453)); IP-Adapter ([2308.06721](https://arxiv.org/abs/2308.06721)); GLIGEN ([2301.07093](https://arxiv.org/abs/2301.07093)); LayoutGPT ([2305.15393](https://arxiv.org/abs/2305.15393)); OpenCOLE ([2406.08232](https://arxiv.org/abs/2406.08232)); AnyText ([2311.03054](https://arxiv.org/abs/2311.03054)); cGAN ([1411.1784](https://arxiv.org/abs/1411.1784)); StyleGAN2-ADA ([2006.06676](https://arxiv.org/abs/2006.06676)).
 - Evaluation: FID ([1706.08500](https://arxiv.org/abs/1706.08500)); KID ([1801.01401](https://arxiv.org/abs/1801.01401)); clean-fid ([2104.11222](https://arxiv.org/abs/2104.11222)); CLIPScore ([2104.08718](https://arxiv.org/abs/2104.08718)); DRaFT ([2309.17400](https://arxiv.org/abs/2309.17400)); DDPO ([2305.13301](https://arxiv.org/abs/2305.13301)); reward over-optimization ([2402.08552](https://arxiv.org/abs/2402.08552)).
 - Tooling: [diffusers](https://huggingface.co/docs/diffusers); [diffusers on MPS (my laptop)](https://huggingface.co/docs/diffusers/optimization/mps); [peft](https://huggingface.co/docs/peft).
