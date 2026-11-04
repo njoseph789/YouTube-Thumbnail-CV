@@ -18,7 +18,7 @@ One row per thumbnail, joined with the API metadata. Full per-detection data is 
 Our own metrics, normalized for channel size and audience, are the targets.
 
 ## 5. Regression
-Relate the features to the metrics to see which are associated with the best-performing videos. This shows association, not cause.
+Relate the features to the metrics to see which are associated with the best-performing videos.
 
 ## Open for later
 - How to condense the per-detection data for the regression.
