@@ -17,7 +17,7 @@ One row per thumbnail, joined with the API metadata. Full per-detection data is 
 ## 4. Add performance metrics
 Our own metrics, normalized for channel size and audience, are the targets.
 
-## 5. Regression
+## 5. Regression or Clustering Even?
 Relate the features to the metrics to see which are associated with the best-performing videos.
 
 ## Open for later
