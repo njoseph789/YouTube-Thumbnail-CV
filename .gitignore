@@ -2,3 +2,13 @@
 client_secret*.json
 token.json
 .DS_Store
+__pycache__/
+*.sal.png
+*.heat.png
+*.subjects.png
+*.sam.png
+*.raw.png
+*.mask[0-9].png
+experiments/dataset_source/
+experiments/Test Images/
+experiments/*/results/
