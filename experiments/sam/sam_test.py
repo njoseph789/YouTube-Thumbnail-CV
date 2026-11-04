@@ -9,7 +9,9 @@ Pipeline:
   5. Rank survivors by size + centrality + SAM score; keep the top-k.
 
 Usage:
-    python experiments/sam/sam_test.py thumb.jpg [--top-k 4] [--save-masks] [--raw]
+    python experiments/sam/sam_test.py [images or folders ...] [--top-k 4] [--save-masks] [--raw]
+  With no arguments it processes every image in experiments/Test Images/.
+  Results go to experiments/sam/results/<image name>/ (override with --out-dir).
 
 Needs: pip install transformers torch pillow numpy scipy
 """
@@ -21,6 +23,20 @@ import torch
 from PIL import Image, ImageDraw
 from scipy.ndimage import binary_fill_holes
 from transformers import pipeline
+
+HERE = Path(__file__).resolve().parent
+TEST_DIR = HERE.parent / "Test Images"
+RESULTS_DIR = HERE / "results"
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def collect_images(paths):
+    """Expand files/folders into image files; no args -> the Test Images."""
+    out = []
+    for p in map(Path, paths or [TEST_DIR]):
+        out += sorted(f for f in p.iterdir() if f.suffix.lower() in IMG_EXTS) if p.is_dir() else [p]
+    return out
+
 
 
 def iou(a, b):
@@ -87,9 +103,9 @@ def draw(img, items, labels=True):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("image")
+    ap.add_argument("images", nargs="*", help="image files and/or folders")
     ap.add_argument("--model", default="facebook/sam-vit-base")
-    ap.add_argument("--out", default=None, help="output overlay path")
+    ap.add_argument("--out-dir", default=None, help="results root (default: experiments/sam/results)")
     ap.add_argument("--points-per-batch", type=int, default=32)
     ap.add_argument("--min-area", type=float, default=0.02, help="min mask area as fraction of image")
     ap.add_argument("--max-area", type=float, default=0.75, help="max mask area (drops background)")
@@ -102,32 +118,35 @@ def main():
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     gen = pipeline("mask-generation", model=args.model, device=device)
-    img = Image.open(args.image).convert("RGB")
-    result = gen(img, points_per_batch=args.points_per_batch)
-    masks = [np.asarray(m, dtype=bool) for m in result["masks"]]
-    scores = result.get("scores", [1.0] * len(masks))
-    print(f"{len(masks)} raw masks on {device}")
+    for path in collect_images(args.images):
+        img = Image.open(path).convert("RGB")
+        result = gen(img, points_per_batch=args.points_per_batch)
+        masks = [np.asarray(m, dtype=bool) for m in result["masks"]]
+        scores = result.get("scores", [1.0] * len(masks))
+        print(f"{path.name}: {len(masks)} raw masks on {device}")
 
-    base = Path(args.out) if args.out else Path(args.image).with_suffix(".sam.png")
+        d = Path(args.out_dir or RESULTS_DIR) / path.stem
+        d.mkdir(parents=True, exist_ok=True)
+        base = d / "sam.png"
 
-    if args.raw:
-        raw_items = [(0.0, m, 0) for m in masks]
-        draw(img, raw_items, labels=False).save(base.with_name(base.stem + ".raw.png"))
+        if args.raw:
+            raw_items = [(0.0, m, 0) for m in masks]
+            draw(img, raw_items, labels=False).save(d / "raw.png")
 
-    kept = filter_and_merge(masks, scores, args.min_area, args.max_area, args.dedupe_iou, args.contain)
-    print(f"{len(kept)} after filter/dedupe/merge")
-    if not kept:
-        print("nothing survived; loosen --min-area/--max-area")
-        return
-    top = rank(kept, args.top_k)
-    draw(img, top).save(base)
-    print("saved", base)
+        kept = filter_and_merge(masks, scores, args.min_area, args.max_area, args.dedupe_iou, args.contain)
+        print(f"{len(kept)} after filter/dedupe/merge")
+        if not kept:
+            print("nothing survived; loosen --min-area/--max-area")
+            continue
+        top = rank(kept, args.top_k)
+        draw(img, top).save(base)
+        print("saved", base)
 
-    if args.save_masks:
-        for i, (_, m, _) in enumerate(top):
-            p = base.with_name(f"{base.stem}.mask{i}.png")
-            Image.fromarray((m * 255).astype(np.uint8)).save(p)
-            print("saved", p)
+        if args.save_masks:
+            for i, (_, m, _) in enumerate(top):
+                p = base.with_name(f"mask{i}.png")
+                Image.fromarray((m * 255).astype(np.uint8)).save(p)
+                print("saved", p)
 
 
 if __name__ == "__main__":

@@ -9,3 +9,6 @@ __pycache__/
 *.sam.png
 *.raw.png
 *.mask[0-9].png
+experiments/dataset_source/
+experiments/Test Images/
+experiments/*/results/
