@@ -1,4 +1,4 @@
-# YouTube Thumbnail Feature Extraction: Project Plan
+# YouTube Thumbnail Feature Extraction: Proposed Project Plan
 
 ## 1. Collect and store
 Pull thumbnails and metadata from the YouTube API, with images and metadata linked by video ID.
