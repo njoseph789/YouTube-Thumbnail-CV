@@ -5,10 +5,10 @@ Pull thumbnails and metadata from the YouTube API, with images and metadata link
 
 ## 2. Extract features (neural networks)
 
-- **Objects:** customized detector, with Grounding DINO and YOLO-World as candidates. The transfer learning owner will compare and experiment with configurations.
+- **Objects:** Customized detector, with Grounding DINO and YOLO-World as candidates. The transfer learning owner will compare and experiment with configurations.
 - **Faces:** MediaPipe Face Detection and RetinaFace as candidates, plus an emotion classifier.
 - **Text:** PaddleOCR and Florence-2 as candidates.
-- **Color and lighting:** computed directly from the pixels (brightness, contrast, saturation, warm vs cool, dominant colors).
+- **Color and lighting:** Computed directly from the pixels (brightness, contrast, saturation, warm vs cool, dominant colors).
 - Object, face, and text detection already record size and locations within the thumbnail framing.
 
 ## 3. Build the feature table
