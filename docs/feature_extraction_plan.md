@@ -5,7 +5,7 @@ Pull thumbnails and metadata from the YouTube API, with images and metadata link
 
 ## 2. Extract features (Neural Networks)
 
-- **Objects:** Customized detector, with Grounding DINO (Nathan) and YOLO-World (Eric) as candidates. The transfer learning owner will compare and experiment with configurations. Get a 100 image sample set (Eric). Test DINO and YOLO-World off this to determine which one is a better baseline.
+- **Objects:** Customized detector, with Grounding DINO (Nathan), Vision Transformer Model (Nathan) and YOLO-World (Eric) as candidates. The transfer learning owner will compare and experiment with configurations. Get a 100 image sample set (Eric). Test DINO and YOLO-World off this to determine which one is a better baseline.
 - Assess text extraction between text in the background versus overlayed (To separate when passing to Florence-2 OCR model, nice to have but not critical)
 - **Faces:** MediaPipe Face Detection and RetinaFace as candidates, plus an emotion classifier. - Flagged in the pipeline if a face is detected (Ask Alex to pick one --> Colin looks into it because Alex is focused on the generative model)
 - **Text:** Florence-2 (Nick). - Flagged in the pipeline if text is detected
