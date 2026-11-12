@@ -13,3 +13,6 @@ experiments/dataset_source/
 experiments/Test Images/
 experiments/*/results/
 /Thumbnail Images
+images/Thumbnail Images/
+generation/outputs/
+
