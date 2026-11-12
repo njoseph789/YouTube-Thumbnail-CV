@@ -12,4 +12,7 @@ __pycache__/
 experiments/dataset_source/
 experiments/Test Images/
 experiments/*/results/
-/Thumbnail Imagesgeneration/outputs/
+/Thumbnail Images
+images/Thumbnail Images/
+generation/outputs/
+
