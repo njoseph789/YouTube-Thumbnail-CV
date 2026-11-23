@@ -13,8 +13,8 @@ forward pass and records:
 Each model is one MLflow run in a single experiment so results compare directly.
 
 Usage (compviz venv):
-    python experiments/grounding_dino/run_baseline.py --limit 3 --models tiny
-    python experiments/grounding_dino/run_baseline.py
+    python experiments/object_detection/run_baseline.py --limit 3 --models tiny
+    python experiments/object_detection/run_baseline.py
 """
 import argparse
 import csv

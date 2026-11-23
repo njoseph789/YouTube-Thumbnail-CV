@@ -13,7 +13,7 @@ difference is within noise (95% interval includes 0), the smaller/faster model
 (earlier in MODEL_ORDER) wins. Intervals are computed for every model pair.
 
 Usage (compviz venv), after run_baseline.py:
-    python experiments/grounding_dino/evaluate.py
+    python experiments/object_detection/evaluate.py
 """
 import argparse
 import csv

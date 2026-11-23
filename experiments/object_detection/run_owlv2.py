@@ -17,8 +17,8 @@ Differences from Grounding DINO worth knowing:
   (IoU 0.3). keyword_scores.csv is taken before NMS and is unaffected.
 
 Usage (compviz venv):
-    python experiments/grounding_dino/run_owlv2.py --limit 3
-    python experiments/grounding_dino/run_owlv2.py
+    python experiments/object_detection/run_owlv2.py --limit 3
+    python experiments/object_detection/run_owlv2.py
 """
 import argparse
 import sys

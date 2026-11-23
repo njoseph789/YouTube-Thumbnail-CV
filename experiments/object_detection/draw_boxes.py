@@ -7,8 +7,8 @@ Writes, under results/annotated/ (gitignored with the rest of results/):
 Boxes are colored by prompt category; each label shows "keyword score".
 
 Usage (compviz venv), after run_baseline.py:
-    python experiments/grounding_dino/draw_boxes.py
-    python experiments/grounding_dino/draw_boxes.py --min-score 0.4 --models base
+    python experiments/object_detection/draw_boxes.py
+    python experiments/object_detection/draw_boxes.py --min-score 0.4 --models base
 """
 import argparse
 import colorsys

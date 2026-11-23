@@ -4,7 +4,7 @@ Each image is annotated with the keywords from prompts.py that are visibly
 present in it (presence only, no boxes). Annotations were made by manually
 reviewing every thumbnail. Output: ground_truth.csv (image, category, label).
 
-Run: python experiments/grounding_dino/build_ground_truth.py
+Run: python experiments/object_detection/build_ground_truth.py
 """
 import csv
 import sys
