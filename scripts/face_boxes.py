@@ -120,8 +120,44 @@ class RetinaFaceDet:  # TF-based; most fragile install, so optional
         return [(*v["facial_area"], float(v["score"])) for v in r.values()]
 
 
+class AnimeFace:  # YOLOv8 anime-face detector (AGPL-3.0), catches drawn/anime faces
+    def __init__(self):
+        from huggingface_hub import hf_hub_download
+        from ultralytics import YOLO
+        self.m = YOLO(hf_hub_download("Fuyucchi/yolov8_animeface", "yolov8x6_animeface.pt"))
+
+    def __call__(self, img):
+        r = self.m.predict(img, conf=LOW_CONF, imgsz=1280, verbose=False)[0]
+        return [(*b.xyxy[0].tolist(), float(b.conf[0])) for b in r.boxes]
+
+
+class GDino:  # Grounding DINO open-vocabulary, prompted for real + cartoon faces
+    def __init__(self, name="IDEA-Research/grounding-dino-tiny"):
+        import torch
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        self.dev = "cuda" if torch.cuda.is_available() else "cpu"
+        self.proc = AutoProcessor.from_pretrained(name)
+        self.m = AutoModelForZeroShotObjectDetection.from_pretrained(name).to(self.dev).eval()
+        self.text = "a face. a cartoon face. an anime face."
+
+    def __call__(self, img):
+        import torch
+        from PIL import Image
+        pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        inp = self.proc(images=pil, text=self.text, return_tensors="pt").to(self.dev)
+        with torch.no_grad():
+            out = self.m(**inp)
+        kw = dict(text_threshold=0.25, target_sizes=[pil.size[::-1]])
+        try:  # argument name differs across transformers versions
+            res = self.proc.post_process_grounded_object_detection(out, inp.input_ids, threshold=0.25, **kw)[0]
+        except TypeError:
+            res = self.proc.post_process_grounded_object_detection(out, inp.input_ids, box_threshold=0.25, **kw)[0]
+        return [(*b.tolist(), float(s)) for b, s in zip(res["boxes"], res["scores"])]
+
+
 DETECTORS = {"scrfd": SCRFD, "yunet": YuNet, "yolo": YoloFace,
-             "mtcnn": MTCNNDet, "mediapipe": MediaPipe, "retinaface": RetinaFaceDet}
+             "mtcnn": MTCNNDet, "mediapipe": MediaPipe, "retinaface": RetinaFaceDet,
+             "animeface": AnimeFace, "gdino": GDino}
 
 
 # ---------------------------------------------------------------- helpers
@@ -300,12 +336,14 @@ def cmd_final(a):
 
 
 # ------------------------------------------- ensemble + manual review -> truth
-ENS_THR = {"yolo": 0.5, "mtcnn": 0.9, "yunet": 0.7, "scrfd": 0.7}  # per-model cutoffs from comparison.csv
+ENS_THR = {"yolo": 0.5, "mtcnn": 0.9, "yunet": 0.7, "scrfd": 0.7,
+           "animeface": 0.5, "gdino": 0.35}  # last two are starting guesses; tune from image-level scores  # per-model cutoffs from comparison.csv
 
 
 def load_models(out):
+    # Only per-detector outputs; faces_final / faces_ensemble are derived files and must not vote.
     return {p.stem[len("faces_"):]: pd.read_csv(p) for p in Path(out).glob("faces_*.csv")
-            if p.stem not in ("faces_ensemble",)}
+            if p.stem[len("faces_"):] in DETECTORS}
 
 
 def fuse(dfs, img):
@@ -552,9 +590,150 @@ def cmd_realface(a):
         print(f"\n{len(mis)} mismatches at thr={a.real_thr} -> final_mismatches.csv")
 
 
+def cmd_boxcheck(a):
+    """Contact sheets of final boxes for manual tightness review; --summarize tallies box_review.csv."""
+    out, root = Path(a.out), Path(a.images)
+    if a.summarize:
+        r = pd.read_csv(out / "box_review.csv")
+        r = r[r.ok.notna()].copy()
+        r["ok"] = r.ok.astype(int)
+        print(f"{len(r)} boxes reviewed, {r.ok.mean():.1%} good\n")
+        print(r.groupby("votes").ok.agg(["count", "mean"]).rename(columns={"mean": "good_rate"}).round(3))
+        print(r.groupby("is_real").ok.agg(["count", "mean"]).rename(columns={"mean": "good_rate"}).round(3))
+        bad = r[r.ok == 0]
+        if len(bad):
+            print("\nissues:", bad.issue.fillna("unspecified").value_counts().to_dict())
+            print(bad[["box_id", "image", "votes", "p_real", "issue"]].to_string(index=False))
+        return
+    df = pd.read_csv(out / "faces_final.csv")
+    pri = df[(df.votes < 4) | (df.is_real == 0)]
+    rest = df.drop(pri.index).sample(frac=1, random_state=1)
+    pick = pd.concat([pri, rest]).head(a.n).sort_values(["image", "face_idx"]).reset_index(drop=True)
+    pick["box_id"] = range(len(pick))
+    tiles = []
+    for r in pick.itertuples():
+        img = cv2.imread(str(root / r.image))
+        H, W = img.shape[:2]
+        th = max(2, W // 250)
+        for o in df[df.image == r.image].itertuples():  # context: other boxes thin gray
+            cv2.rectangle(img, (int(o.x * W), int(o.y * H)), (int((o.x + o.w) * W), int((o.y + o.h) * H)), (160, 160, 160), 1)
+        col = (0, 200, 0) if r.is_real else (0, 140, 255)
+        cv2.rectangle(img, (int(r.x * W), int(r.y * H)), (int((r.x + r.w) * W), int((r.y + r.h) * H)), col, th)
+        tile = cv2.resize(img, (480, 270))
+        cv2.putText(tile, f"#{r.box_id} v{r.votes} p{r.p_real:.2f}", (6, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        tiles.append(tile)
+    per, cols = 12, 3
+    for s in range(0, len(tiles), per):
+        chunk = tiles[s:s + per]
+        while len(chunk) % cols:
+            chunk.append(np.zeros_like(tiles[0]))
+        sheet = np.vstack([np.hstack(chunk[i:i + cols]) for i in range(0, len(chunk), cols)])
+        cv2.imwrite(str(out / f"boxcheck_{s // per + 1:02d}.jpg"), sheet)
+    rev = pick[["box_id", "image", "face_idx", "votes", "models", "p_real", "is_real"]].copy()
+    rev["ok"], rev["issue"] = "", ""
+    rev.to_csv(out / "box_review.csv", index=False)
+    print(f"{len(pick)} boxes -> {out}/boxcheck_*.jpg and box_review.csv")
+    print("Fill ok (1 = tight/good, 0 = bad) and issue (loose/tight/offset/notface) in box_review.csv, then run with --summarize.")
+
+
+def cmd_facecheck(a):
+    """Contact sheet of images where the ensemble (>=min_votes) disagrees with has_face / has_real_face."""
+    out, root = Path(a.out), Path(a.images)
+    dfs = load_models(out)
+    lab = pd.read_csv(a.labels)
+    lab["image"] = lab.source_path.map(lambda s: Path(s).name)
+    target = a.target
+    rows, tiles = [], []
+    for r in lab.itertuples():
+        boxes = sorted(fuse(dfs, r.image), key=lambda f: -f[4])
+        pred = int(any(len(f[5]) >= a.min_votes for f in boxes))
+        truth = int(getattr(r, target))
+        if pred == truth:
+            continue
+        kind = "FN (missed)" if truth == 1 else "FP (extra)"
+        rows.append(dict(image=r.image, kind=kind, has_face=r.has_face, has_real_face=r.has_real_face,
+                         n_boxes=len(boxes), max_votes=max([len(f[5]) for f in boxes], default=0),
+                         models_seen="+".join(sorted({m for f in boxes for m in f[5]})), verdict="", note=""))
+        img = cv2.imread(str(root / r.image))
+        H, W = img.shape[:2]
+        th = max(2, W // 250)
+        for x, y, w, h, c, ms in boxes:
+            col = (0, 200, 0) if len(ms) >= a.min_votes else (0, 140, 255)  # green = ensemble, orange = low-vote
+            cv2.rectangle(img, (int(x * W), int(y * H)), (int((x + w) * W), int((y + h) * H)), col, th)
+            cv2.putText(img, f"v{len(ms)}", (int(x * W), max(int(y * H) - 4, 16)), cv2.FONT_HERSHEY_SIMPLEX, max(0.6, W / 1200), col, 2)
+        tile = cv2.resize(img, (480, 270))
+        cv2.putText(tile, f"#{len(rows) - 1} {kind}", (6, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(tile, f"face={r.has_face} real={r.has_real_face}", (6, 258), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        tiles.append(tile)
+    pd.DataFrame(rows).to_csv(out / "facecheck.csv", index=False)
+    for s in range(0, len(tiles), 12):
+        chunk = tiles[s:s + 12]
+        while len(chunk) % 3:
+            chunk.append(np.zeros_like(tiles[0]))
+        cv2.imwrite(str(out / f"facecheck_{s // 12 + 1:02d}.jpg"),
+                    np.vstack([np.hstack(chunk[i:i + 3]) for i in range(0, len(chunk), 3)]))
+    print(f"{len(rows)} disagreements on {target} (ensemble votes>={a.min_votes}) -> facecheck.csv, facecheck_*.jpg")
+    for r in rows:
+        print(f"  {r['kind']:12s} {r['image']}  max_votes={r['max_votes']} models={r['models_seen']}")
+
+
+def cmd_heldout(a):
+    """Draw n fresh images (not in the labeled subset), copy them flat as channel__id.ext,
+    and write numbered label sheets + a blank face_labels.csv to fill in BEFORE looking at model output."""
+    import shutil
+    root, out = Path(a.images), Path(a.out)
+    seen = {Path(s).stem for s in pd.read_csv(a.exclude).iloc[:, 0]}
+    cands = {}
+    for p in sorted(root.rglob("*")):
+        if p.suffix.lower() in EXTS and f"{p.parent.name}__{p.stem}" not in seen:
+            cands[p.relative_to(root).as_posix()] = p
+    print(f"{len(cands)} candidate images not in the labeled subset")
+    pick = spread(list(cands), a.n, seed=a.seed)
+    (out / "images").mkdir(parents=True, exist_ok=True)
+    rows, tiles = [], []
+    for i, rel_name in enumerate(pick):
+        p = cands[rel_name]
+        flat = f"{p.parent.name}__{p.stem}{p.suffix.lower()}"
+        shutil.copy(p, out / "images" / flat)
+        rows.append(dict(source_path=f"images/heldout/{flat}", has_face="", has_real_face=""))
+        img = cv2.imread(str(p))
+        tile = cv2.resize(img, (480, 270))
+        cv2.putText(tile, f"#{i}", (6, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 3)
+        tiles.append(tile)
+    pd.DataFrame(rows).to_csv(out / "face_labels.csv", index=False)
+    for s in range(0, len(tiles), 12):
+        chunk = tiles[s:s + 12]
+        while len(chunk) % 3:
+            chunk.append(np.zeros_like(tiles[0]))
+        cv2.imwrite(str(out / f"label_sheet_{s // 12 + 1:02d}.jpg"),
+                    np.vstack([np.hstack(chunk[i:i + 3]) for i in range(0, len(chunk), 3)]))
+    print(f"{len(pick)} images -> {out}/images, face_labels.csv (blank), label_sheet_*.jpg")
+    print("Fill has_face / has_real_face (1/0) for every row; row order = tile numbers (#0 = first row).")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
+    ho = sp.add_parser("heldout")
+    ho.add_argument("--images", required=True, help="root folder of all thumbnails (channel subfolders)")
+    ho.add_argument("--exclude", required=True, help="face_labels.csv of the already-used subset")
+    ho.add_argument("--out", default="heldout")
+    ho.add_argument("--n", type=int, default=50)
+    ho.add_argument("--seed", type=int, default=2)
+    ho.set_defaults(fn=cmd_heldout)
+    fc = sp.add_parser("facecheck")
+    fc.add_argument("--images", required=True)
+    fc.add_argument("--labels", required=True)
+    fc.add_argument("--out", default="face_results")
+    fc.add_argument("--target", default="has_face", choices=["has_face", "has_real_face"])
+    fc.add_argument("--min-votes", type=int, default=2)
+    fc.set_defaults(fn=cmd_facecheck)
+    bc = sp.add_parser("boxcheck")
+    bc.add_argument("--images", default=".")
+    bc.add_argument("--out", default="face_results")
+    bc.add_argument("--n", type=int, default=36)
+    bc.add_argument("--summarize", action="store_true")
+    bc.set_defaults(fn=cmd_boxcheck)
     rf = sp.add_parser("realface")
     rf.add_argument("--images", required=True)
     rf.add_argument("--out", default="face_results")
