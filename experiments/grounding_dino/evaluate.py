@@ -9,13 +9,15 @@ Secondary: mAP over keywords with >=3 positives, per-category mAP, and precision
 recall / F1 at the run's default thresholds (from detections.csv).
 
 Selection rule (decisions.md): highest mAP wins; if a bootstrap over images says the
-difference is within noise (95% interval includes 0), tiny wins.
+difference is within noise (95% interval includes 0), the smaller/faster model
+(earlier in MODEL_ORDER) wins. Intervals are computed for every model pair.
 
 Usage (compviz venv), after run_baseline.py:
     python experiments/grounding_dino/evaluate.py
 """
 import argparse
 import csv
+import itertools
 import sys
 from pathlib import Path
 
@@ -29,7 +31,7 @@ from tracking import setup_mlflow  # noqa: E402
 
 KW_CAT = {kw: cat for cat, kws in KEYWORDS.items() for kw in kws}
 ALL_KW = list(KW_CAT)
-MODEL_ORDER = ["tiny", "base"]
+MODEL_ORDER = ["tiny", "base", "owlv2"]
 
 
 def average_precision(y, s):
@@ -154,26 +156,32 @@ def main():
         for j, kw in enumerate(ALL_KW):
             w.writerow([KW_CAT[kw], kw, int(npos[j])] + ["" if np.isnan(report[m][j]) else f"{report[m][j]:.4f}" for m in models])
 
-    # Bootstrap over images: is the tiny/base difference within noise?
-    verdict, ci = None, None
-    if set(models) >= {"tiny", "base"} and len(images) >= 10:
+    # Bootstrap over images: are pairwise mAP differences within noise? Same resamples
+    # for every pair. Winner = highest mAP; if its interval against another model
+    # includes 0 the two tie and the model earlier in MODEL_ORDER (smaller/faster) wins.
+    pair_ci, verdict = {}, None
+    if len(models) >= 2 and len(images) >= 10:
         rng = np.random.default_rng(0)
-        diffs = []
+        diffs = {p: [] for p in itertools.combinations(models, 2)}
         for _ in range(args.bootstrap):
             rows = rng.integers(0, len(images), len(images))
-            a = per_keyword_ap(y, scores["base"], rows)
-            b = per_keyword_ap(y, scores["tiny"], rows)
-            ok = ~np.isnan(a) & ~np.isnan(b)
-            if ok.any():
-                diffs.append(np.mean(a[ok]) - np.mean(b[ok]))
-        lo, hi = np.percentile(diffs, [2.5, 97.5])
-        ci = (float(lo), float(hi))
-        if lo > 0:
-            verdict = "base"
-        elif hi < 0:
-            verdict = "tiny"
-        else:
-            verdict = "tiny (tie: difference within noise)"
+            aps = {m: per_keyword_ap(y, scores[m], rows) for m in models}
+            for (m1, m2) in diffs:
+                ok = ~np.isnan(aps[m1]) & ~np.isnan(aps[m2])
+                if ok.any():
+                    diffs[(m1, m2)].append(np.mean(aps[m2][ok]) - np.mean(aps[m1][ok]))
+        for p, d in diffs.items():
+            lo, hi = np.percentile(d, [2.5, 97.5])
+            pair_ci[p] = (float(lo), float(hi))  # mAP(second) - mAP(first)
+        winner = max(models, key=lambda m: metrics[m]["mAP"])
+        for m in models:  # earlier-in-order model within noise of the winner takes it
+            if m == winner:
+                break
+            lo, hi = pair_ci[(m, winner)] if (m, winner) in pair_ci else pair_ci[(winner, m)]
+            if lo <= 0 <= hi:
+                winner = m
+                break
+        verdict = winner
 
     # Print.
     print(f"\n{'metric':<24}" + "".join(f"{m:>10}" for m in models))
@@ -183,8 +191,11 @@ def main():
     for cat in KEYWORDS:
         vals = [metrics[m].get(f"mAP_{cat}") for m in models]
         print(f"  {cat:<22}" + "".join(f"{'-' if v is None else f'{v:.3f}':>10}" for v in vals))
-    if ci:
-        print(f"\nmAP(base) - mAP(tiny): 95% bootstrap interval [{ci[0]:+.3f}, {ci[1]:+.3f}]")
+    if pair_ci:
+        print("\n95% bootstrap interval of mAP difference (second minus first)")
+        for (m1, m2), (lo, hi) in pair_ci.items():
+            note = "within noise" if lo <= 0 <= hi else "significant"
+            print(f"  {m2} - {m1}: [{lo:+.3f}, {hi:+.3f}]  {note}")
         print(f"verdict: {verdict}")
     print(f"\nper-keyword AP -> {ap_csv}")
 
@@ -200,7 +211,8 @@ def main():
                 mlflow.log_artifact(str(ap_csv))
                 if verdict:
                     mlflow.set_tag("selection_verdict", verdict)
-                    mlflow.set_tag("bootstrap_ci_base_minus_tiny", f"[{ci[0]:+.4f}, {ci[1]:+.4f}]")
+                    for (m1, m2), (lo, hi) in pair_ci.items():
+                        mlflow.set_tag(f"bootstrap_ci_{m2}_minus_{m1}", f"[{lo:+.4f}, {hi:+.4f}]")
         print("logged to MLflow")
 
 
