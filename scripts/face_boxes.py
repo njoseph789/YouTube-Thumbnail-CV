@@ -190,13 +190,13 @@ def prf(tp, fp, fn):
     return p, r, (2 * p * r / (p + r) if p + r else 0.0)
 
 
-def draw_montage(images, dfs, out_dir, conf=0.5, cell=420, n=24):
+def draw_montage(images, dfs, out_dir, rel, conf=0.5, cell=420, n=24):
     colors = [(0, 200, 0), (0, 0, 255), (255, 120, 0), (200, 0, 200), (0, 200, 200), (120, 120, 120)]
     for m, df in dfs.items():
         tiles = []
         for p in images[:n]:
             img = cv2.imread(str(p))
-            for r in df[(df.image == p.name) & (df.conf >= conf)].itertuples():
+            for r in df[(df.image == rel(p)) & (df.conf >= conf)].itertuples():
                 H, W = img.shape[:2]
                 cv2.rectangle(img, (int(r.x * W), int(r.y * H)),
                               (int((r.x + r.w) * W), int((r.y + r.h) * H)),
@@ -213,10 +213,33 @@ def draw_montage(images, dfs, out_dir, conf=0.5, cell=420, n=24):
 def cmd_run(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    images = sorted(p for p in Path(a.images).rglob("*") if p.suffix.lower() in EXTS)
-    if a.limit:
-        images = images[:a.limit]
-    print(f"{len(images)} images")
+    root = Path(a.images)
+    images = sorted(p for p in root.rglob("*") if p.suffix.lower() in EXTS)
+    if a.list:  # restrict to the files named in a CSV (first column, e.g. face_labels.csv source_path)
+        keep = {Path(s).name for s in pd.read_csv(a.list).iloc[:, 0]}
+        images = [p for p in images if p.name in keep]
+    if a.limit and len(images) > a.limit:
+        # Spread the sample evenly across channel subfolders (reproducible).
+        import random
+        from collections import defaultdict
+        random.seed(0)
+        by_ch = defaultdict(list)
+        for p in images:
+            by_ch[p.parent].append(p)
+        for v in by_ch.values():
+            random.shuffle(v)
+        picked, chans = [], list(by_ch)
+        while len(picked) < a.limit and chans:
+            for c in list(chans):
+                if by_ch[c]:
+                    picked.append(by_ch[c].pop())
+                    if len(picked) == a.limit:
+                        break
+                else:
+                    chans.remove(c)
+        images = sorted(picked)
+    print(f"{len(images)} images from {len({p.parent for p in images})} folders")
+    rel = lambda p: p.relative_to(root).as_posix()  # unique key: channel/file.jpg
 
     dfs, timing = {}, {}
     for name in a.models:
@@ -232,7 +255,7 @@ def cmd_run(a):
                 continue
             H, W = img.shape[:2]
             try:
-                rows += to_rows(p.name, det(img), W, H)
+                rows += to_rows(rel(p), det(img), W, H)
             except Exception as e:
                 print(f"  {name} failed on {p.name}: {e}")
         timing[name] = (time.time() - t0) / len(images)
@@ -240,7 +263,8 @@ def cmd_run(a):
         dfs[name].to_csv(out / f"faces_{name}.csv", index=False)
 
     truth = pd.read_csv(a.truth) if a.truth else None
-    names = [p.name for p in images]
+    names = [rel(p) for p in images]
+    (out / "images.txt").write_text("\n".join(names))  # lets `ensemble` sample no-face images too
     report = []
     for m, df in dfs.items():
         for thr in (0.3, 0.5, 0.7, 0.9):
@@ -262,7 +286,7 @@ def cmd_run(a):
     rep = pd.DataFrame(report)
     rep.to_csv(out / "comparison.csv", index=False)
     print(rep.to_string(index=False))
-    draw_montage(images, dfs, out, conf=0.5)
+    draw_montage(images, dfs, out, rel, conf=0.5)
     print(f"\nWrote per-model CSVs, comparison.csv and overlay_*.jpg to {out}/")
     print("Rank by truth_F1 if you provided --truth; otherwise consensus_F1 is only a rough proxy.")
 
@@ -275,16 +299,293 @@ def cmd_final(a):
     print(f"faces.csv: {len(df)} faces, {df.image.nunique()} images (model={a.model}, conf>={a.conf})")
 
 
+# ------------------------------------------- ensemble + manual review -> truth
+ENS_THR = {"yolo": 0.5, "mtcnn": 0.9, "yunet": 0.7, "scrfd": 0.7}  # per-model cutoffs from comparison.csv
+
+
+def load_models(out):
+    return {p.stem[len("faces_"):]: pd.read_csv(p) for p in Path(out).glob("faces_*.csv")
+            if p.stem not in ("faces_ensemble",)}
+
+
+def fuse(dfs, img):
+    """Cluster boxes across models (IoU>=0.5, one box per model per cluster).
+    Returns [(x, y, w, h, mean_conf, [models])] with confidence-weighted box averages."""
+    pool = [(m, b) for m, d in dfs.items() for b in boxes_of(d, img) if b[4] >= ENS_THR.get(m, 0.5)]
+    clusters = []
+    for m, b in sorted(pool, key=lambda t: -t[1][4]):
+        for c in clusters:
+            if m not in c["models"] and iou(c["box"], b) >= 0.5:
+                c["members"].append(b)
+                c["models"].add(m)
+                break
+        else:
+            clusters.append({"box": b, "members": [b], "models": {m}})
+    res = []
+    for c in clusters:
+        arr = np.array([m[:4] for m in c["members"]])
+        wts = np.array([m[4] for m in c["members"]])
+        x, y, w, h = (arr * wts[:, None]).sum(0) / wts.sum()
+        res.append((x, y, w, h, float(wts.mean()), sorted(c["models"])))
+    return res
+
+
+def spread(names, n, seed=1):
+    """Sample n names spread evenly across channel folders (first path component)."""
+    import random
+    from collections import defaultdict
+    random.seed(seed)
+    g = defaultdict(list)
+    for s in names:
+        g[s.split("/")[0].split("__")[0]].append(s)  # channel = folder, or prefix before "__" in flat layouts
+    for v in g.values():
+        random.shuffle(v)
+    picked, keys = [], list(g)
+    while len(picked) < n and keys:
+        for k in list(keys):
+            if g[k]:
+                picked.append(g[k].pop())
+            else:
+                keys.remove(k)
+            if len(picked) == n:
+                break
+    return sorted(picked)
+
+
+def cmd_ensemble(a):
+    root, out = Path(a.images), Path(a.out)
+    dfs = load_models(out)
+    lst = out / "images.txt"
+    if lst.exists():
+        names = lst.read_text().split("\n")
+    else:
+        names = sorted(set().union(*[set(d.image) for d in dfs.values()]))
+        print("WARNING: images.txt missing (re-run `run` to include no-face images in the sample).")
+    sample = spread(names, a.n)
+    (out / "reviewed_images.txt").write_text("\n".join(sample))
+    rev_dir = out / "review_imgs"
+    rev_dir.mkdir(exist_ok=True)
+    rows = []
+    for i, name in enumerate(sample):
+        img = cv2.imread(str(root / name))
+        if img is None:
+            print("cannot read", name)
+            continue
+        H, W = img.shape[:2]
+        grid = img.copy()
+        for t in range(1, 10):  # 10% grid so missed faces can be located by eye
+            cv2.line(grid, (int(W * t / 10), 0), (int(W * t / 10), H), (220, 220, 220), 1)
+            cv2.line(grid, (0, int(H * t / 10)), (W, int(H * t / 10)), (220, 220, 220), 1)
+            cv2.putText(grid, f".{t}", (int(W * t / 10) + 2, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            cv2.putText(grid, f".{t}", (2, int(H * t / 10) - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        vis = cv2.addWeighted(grid, 0.4, img, 0.6, 0)
+        fs, th = max(0.6, W / 1000), max(2, W // 400)
+        for j, (x, y, w, h, c, ms) in enumerate(sorted(fuse(dfs, name), key=lambda f: -f[4])):
+            keep = int(len(ms) >= 2)
+            rows.append(dict(image=name, review_file=f"{i:02d}.jpg", box_id=j, votes=len(ms),
+                             models="+".join(ms), conf=round(c, 3), x=x, y=y, w=w, h=h, keep=keep))
+            col = (0, 200, 0) if keep else (0, 140, 255)  # green = default keep, orange = default drop
+            p1, p2 = (int(x * W), int(y * H)), (int((x + w) * W), int((y + h) * H))
+            cv2.rectangle(vis, p1, p2, col, th)
+            cv2.putText(vis, f"#{j} v{len(ms)}", (p1[0], max(p1[1] - 6, 18)), cv2.FONT_HERSHEY_SIMPLEX, fs, col, th)
+        cv2.putText(vis, f"{i:02d} | {name}", (6, H - 8), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.8, (0, 255, 255), 2)
+        s = min(1.0, 1280 / W)
+        cv2.imwrite(str(rev_dir / f"{i:02d}.jpg"), cv2.resize(vis, (int(W * s), int(H * s))))
+    pd.DataFrame(rows).to_csv(out / "ensemble_review.csv", index=False)
+    if not (out / "missed_faces.csv").exists():
+        pd.DataFrame(columns=["image", "x", "y", "w", "h"]).to_csv(out / "missed_faces.csv", index=False)
+    print(f"{len(sample)} images, {len(rows)} candidate boxes -> {out}/ensemble_review.csv, review_imgs/")
+    print("Edit `keep` (1/0) in ensemble_review.csv; add missed faces to missed_faces.csv; then run `truth`.")
+
+
+def cmd_truth(a):
+    out = Path(a.out)
+    rev = pd.read_csv(out / "ensemble_review.csv")
+    cols = ["image", "x", "y", "w", "h"]
+    parts = [rev[rev.keep == 1][cols]]
+    mp = out / "missed_faces.csv"
+    if mp.exists():
+        m = pd.read_csv(mp)
+        if len(m):
+            parts.append(m[cols])
+    t = pd.concat(parts, ignore_index=True)
+    t["conf"] = 1.0
+    t["face_idx"] = t.groupby("image").cumcount()
+    t["cx"], t["cy"] = t.x + t.w / 2, t.y + t.h / 2
+    t.to_csv(out / "truth.csv", index=False)
+    n = len((out / "reviewed_images.txt").read_text().split("\n"))
+    print(f"truth.csv: {len(t)} faces across {t.image.nunique()} of {n} reviewed images")
+
+
+def cmd_score(a):
+    out = Path(a.out)
+    dfs = load_models(out)
+    truth = pd.read_csv(out / "truth.csv")
+    names = (out / "reviewed_images.txt").read_text().split("\n")
+    rows = []
+    ens = [dict(image=n, conf=len(f[5]), x=f[0], y=f[1], w=f[2], h=f[3]) for n in names for f in fuse(dfs, n)]
+    cands = [(m, d, ENS_THR.get(m, 0.5)) for m, d in dfs.items()]
+    cands += [("ensemble_votes>=1", pd.DataFrame(ens), 1), ("ensemble_votes>=2", pd.DataFrame(ens), 2)]
+    for m, d, base in cands:
+        thrs = [0.3, 0.5, 0.7, 0.9] if not m.startswith("ensemble") else [base]
+        for thr in thrs:
+            sub = d[d.conf >= thr]
+            tp = fp = fn = 0
+            for n in names:
+                r = match(boxes_of(sub, n), boxes_of(truth, n))
+                tp, fp, fn = tp + r[0], fp + r[1], fn + r[2]
+            P, R, F = prf(tp, fp, fn)
+            rows.append(dict(model=m, conf_thr=thr, TP=tp, FP=fp, FN=fn, P=round(P, 3), R=round(R, 3), F1=round(F, 3)))
+    rep = pd.DataFrame(rows)
+    rep.to_csv(out / "truth_scores.csv", index=False)
+    print(rep.to_string(index=False))
+
+
+def cmd_imgscore(a):
+    """Image-level check vs face_labels.csv: does each model say 'has a face' like the labels do?"""
+    out = Path(a.out)
+    dfs = load_models(out)
+    lab = pd.read_csv(a.labels)
+    lab["image"] = lab.source_path.map(lambda s: Path(s).name)
+    names = list(lab.image)
+    cols = ["image", "conf", "x", "y", "w", "h"]
+    ens = pd.DataFrame([dict(image=n, conf=len(f[5]), x=f[0], y=f[1], w=f[2], h=f[3])
+                        for n in names for f in fuse(dfs, n)], columns=cols)
+    cands = [(m, d, [0.3, 0.5, 0.7, 0.9]) for m, d in dfs.items()]
+    cands += [("ensemble_votes>=1", ens, [1]), ("ensemble_votes>=2", ens, [2])]
+    rows = []
+    for target in ("has_face", "has_real_face"):
+        y = lab.set_index("image")[target].astype(int)
+        for m, d, thrs in cands:
+            for thr in thrs:
+                pred = set(d[d.conf >= thr].image)
+                tp = sum(1 for n in names if y[n] == 1 and n in pred)
+                fp = sum(1 for n in names if y[n] == 0 and n in pred)
+                fn = sum(1 for n in names if y[n] == 1 and n not in pred)
+                P, R, F = prf(tp, fp, fn)
+                rows.append(dict(target=target, model=m, conf_thr=thr, TP=tp, FP=fp, FN=fn,
+                                 P=round(P, 3), R=round(R, 3), F1=round(F, 3)))
+    rep = pd.DataFrame(rows)
+    rep.to_csv(out / "image_level_scores.csv", index=False)
+    print(rep.to_string(index=False))
+    pred2 = set(ens[ens.conf >= 2].image)
+    lab["ensemble_pred"] = lab.image.isin(pred2).astype(int)
+    mis = lab[lab.ensemble_pred != lab.has_real_face][["image", "has_face", "has_real_face", "ensemble_pred"]]
+    mis.to_csv(out / "image_level_mismatches.csv", index=False)
+    print(f"\n{len(mis)} images where ensemble (votes>=2) disagrees with has_real_face -> image_level_mismatches.csv")
+
+
+CLIP_REAL = ["a photograph of a real person's face",
+             "a close-up photo of a human face",
+             "a photo of a person"]
+CLIP_FAKE = ["a cartoon of a face",
+             "an illustration or drawing of a character",
+             "a 3D render of a character's face",
+             "an anime or mascot character"]
+CLIP_PROMPTS = CLIP_REAL + CLIP_FAKE
+
+
+def clip_real_scores(root, df, pad=0.15, bs=32):
+    """Zero-shot CLIP: P(real photographed face) for each box in df (crops padded by `pad`)."""
+    import torch
+    from PIL import Image
+    from transformers import CLIPModel, CLIPProcessor
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    name = "openai/clip-vit-base-patch32"
+    model, proc = CLIPModel.from_pretrained(name).to(dev).eval(), CLIPProcessor.from_pretrained(name)
+    crops, cache = [], {}
+    for r in df.itertuples():
+        if r.image not in cache:
+            cache = {r.image: Image.open(root / r.image).convert("RGB")}
+        im = cache[r.image]
+        W, H = im.size
+        x1, y1 = max(0, (r.x - pad * r.w) * W), max(0, (r.y - pad * r.h) * H)
+        x2, y2 = min(W, (r.x + r.w * (1 + pad)) * W), min(H, (r.y + r.h * (1 + pad)) * H)
+        crops.append(im.crop((int(x1), int(y1), max(int(x2), int(x1) + 2), max(int(y2), int(y1) + 2))))
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(crops), bs):
+            inp = proc(text=CLIP_PROMPTS, images=crops[i:i + bs], return_tensors="pt", padding=True).to(dev)
+            lg = model(**inp).logits_per_image  # (n_crops, n_prompts)
+            nr = len(CLIP_REAL)
+            # group score = logsumexp over the group's prompts minus log(group size), so group sizes don't bias it
+            real = torch.logsumexp(lg[:, :nr], dim=1) - math.log(nr)
+            fake = torch.logsumexp(lg[:, nr:], dim=1) - math.log(len(CLIP_FAKE))
+            out += torch.sigmoid(real - fake).cpu().tolist()
+    return out
+
+
+def cmd_realface(a):
+    """Ensemble boxes (>=min_votes) + CLIP real-vs-cartoon score -> faces_final.csv."""
+    out, root = Path(a.out), Path(a.images)
+    dfs = load_models(out)
+    names = (out / "images.txt").read_text().split("\n")
+    rows = []
+    for n in names:
+        for j, (x, y, w, h, c, ms) in enumerate(sorted(fuse(dfs, n), key=lambda f: -f[4])):
+            if len(ms) >= a.min_votes:
+                rows.append(dict(image=n, x=x, y=y, w=w, h=h, cx=x + w / 2, cy=y + h / 2,
+                                 conf=round(c, 3), votes=len(ms), models="+".join(ms)))
+    df = pd.DataFrame(rows, columns=["image", "x", "y", "w", "h", "cx", "cy", "conf", "votes", "models"])
+    df["p_real"] = 1.0 if a.no_clip else (clip_real_scores(root, df) if len(df) else [])
+    df["is_real"] = (df.p_real >= a.real_thr).astype(int)
+    df["face_idx"] = df.groupby("image").cumcount()
+    df.to_csv(out / "faces_final.csv", index=False)
+    print(f"faces_final.csv: {len(df)} boxes, {df.image.nunique()} images, "
+          f"{int(df.is_real.sum())} marked real at p_real>={a.real_thr}")
+    if a.labels:
+        lab = pd.read_csv(a.labels)
+        lab["image"] = lab.source_path.map(lambda s: Path(s).name)
+        y = lab.set_index("image")["has_real_face"].astype(int)
+        print("\nimage-level check vs has_real_face (any box with p_real >= thr):")
+        for thr in (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
+            pred = set(df[df.p_real >= thr].image)
+            tp = sum(1 for n in y.index if y[n] == 1 and n in pred)
+            fp = sum(1 for n in y.index if y[n] == 0 and n in pred)
+            fn = sum(1 for n in y.index if y[n] == 1 and n not in pred)
+            P, R, F = prf(tp, fp, fn)
+            print(f"  thr={thr:.1f}  TP={tp} FP={fp} FN={fn}  P={P:.3f} R={R:.3f} F1={F:.3f}")
+        pred = set(df[df.is_real == 1].image)
+        lab["pred_real"] = lab.image.isin(pred).astype(int)
+        mis = lab[lab.pred_real != lab.has_real_face][["image", "has_face", "has_real_face", "pred_real"]]
+        mis.to_csv(out / "final_mismatches.csv", index=False)
+        print(f"\n{len(mis)} mismatches at thr={a.real_thr} -> final_mismatches.csv")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
+    rf = sp.add_parser("realface")
+    rf.add_argument("--images", required=True)
+    rf.add_argument("--out", default="face_results")
+    rf.add_argument("--labels", help="face_labels.csv, to check the real/non-real filter")
+    rf.add_argument("--min-votes", type=int, default=2)
+    rf.add_argument("--real-thr", type=float, default=0.5)
+    rf.add_argument("--no-clip", action="store_true", help="skip CLIP (for testing)")
+    rf.set_defaults(fn=cmd_realface)
+    i = sp.add_parser("imgscore")
+    i.add_argument("--labels", required=True, help="path to face_labels.csv")
+    i.add_argument("--out", default="face_results")
+    i.set_defaults(fn=cmd_imgscore)
+    e = sp.add_parser("ensemble")
+    e.add_argument("--images", required=True)
+    e.add_argument("--out", default="face_results")
+    e.add_argument("--n", type=int, default=40)
+    e.set_defaults(fn=cmd_ensemble)
+    t = sp.add_parser("truth")
+    t.add_argument("--out", default="face_results")
+    t.set_defaults(fn=cmd_truth)
+    s = sp.add_parser("score")
+    s.add_argument("--out", default="face_results")
+    s.set_defaults(fn=cmd_score)
     r = sp.add_parser("run")
     r.add_argument("--images", required=True)
     r.add_argument("--out", default="face_results")
-    r.add_argument("--models", nargs="+", default=["scrfd", "yunet", "yolo", "mtcnn", "mediapipe"],
+    r.add_argument("--models", nargs="+", default=["scrfd", "yunet", "yolo", "mtcnn"],
                    choices=list(DETECTORS))
     r.add_argument("--truth")
     r.add_argument("--limit", type=int)
+    r.add_argument("--list", help="CSV whose first column lists the images to use (e.g. face_labels.csv)")
     r.set_defaults(fn=cmd_run)
     f = sp.add_parser("final")
     f.add_argument("--out", default="face_results")
