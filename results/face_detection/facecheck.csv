@@ -1,0 +1,7 @@
+image,kind,has_face,has_real_face,n_boxes,max_votes,models_seen,verdict,note
+Veritasium__sWu9CyDwuFs.jpg,FP (extra),0,0,2,2,gdino+yolo,,
+Scamboli Reviews__NS0ryWdNJwA.jpg,FN (missed),1,0,3,1,gdino,,
+Domics__LAS4CSLAiyY.jpg,FN (missed),1,0,2,1,gdino,,
+Scamboli Reviews__Sk8VtJ9ELQQ.jpg,FN (missed),1,0,1,1,gdino,,
+TheBackyardScientist__-_AshChTEY0.jpg,FN (missed),1,1,2,1,gdino+yunet,,
+jamesbruton__kUsIIin0j6c.jpg,FP (extra),0,0,1,3,gdino+yolo+yunet,,
