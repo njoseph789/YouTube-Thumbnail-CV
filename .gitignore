@@ -16,3 +16,6 @@ experiments/*/results/
 images/Thumbnail Images/
 generation/outputs/
 
+
+# Local decision log, not shared
+experiments/*/decisions.md
